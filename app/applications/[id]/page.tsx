@@ -76,6 +76,11 @@ export default function ApplicationDetailPage() {
   const [lockingId, setLockingId] = useState<number | null>(null);
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // AI drafting state
+  const [generating, setGenerating] = useState<Record<number, boolean>>({});
+  const [refining, setRefining] = useState<Record<number, boolean>>({});
+  const [refineInputs, setRefineInputs] = useState<Record<number, string>>({});
+
   // ── Load ───────────────────────────────────────────────────────────────────
 
   useEffect(() => {
@@ -232,6 +237,83 @@ export default function ApplicationDetailPage() {
     setCopiedId(q.id);
     if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
     copyTimerRef.current = setTimeout(() => setCopiedId(null), 2000);
+  };
+
+  // ── AI drafting handlers ───────────────────────────────────────────────────
+
+  const generateDraft = async (qId: number) => {
+    if (!app) return;
+    setGenerating(prev => ({ ...prev, [qId]: true }));
+    try {
+      const res = await fetch('/api/draft', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ application_id: app.id, question_id: qId }),
+      });
+      if (!res.ok) return;
+      const { draft } = await res.json();
+      if (!draft) return;
+      // Populate textarea immediately
+      setDraftEdits(prev => ({ ...prev, [qId]: draft }));
+      // Auto-save to DB
+      const saveRes = await fetch(`/api/questions/${qId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ draft_response: draft }),
+      });
+      if (saveRes.ok) {
+        const updated: Question = await saveRes.json();
+        setApp(prev => prev
+          ? { ...prev, questions: prev.questions.map(q => q.id === qId ? updated : q) }
+          : prev
+        );
+      }
+    } catch (err) {
+      console.error('Generate draft error:', err);
+    } finally {
+      setGenerating(prev => ({ ...prev, [qId]: false }));
+    }
+  };
+
+  const refineDraft = async (qId: number, currentDraft: string) => {
+    if (!app) return;
+    const instruction = refineInputs[qId]?.trim();
+    if (!instruction) return;
+    setRefining(prev => ({ ...prev, [qId]: true }));
+    try {
+      const res = await fetch('/api/refine', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          application_id: app.id,
+          question_id: qId,
+          current_draft: currentDraft,
+          instruction,
+        }),
+      });
+      if (!res.ok) return;
+      const { draft } = await res.json();
+      if (!draft) return;
+      setDraftEdits(prev => ({ ...prev, [qId]: draft }));
+      setRefineInputs(prev => ({ ...prev, [qId]: '' }));
+      // Auto-save to DB
+      const saveRes = await fetch(`/api/questions/${qId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ draft_response: draft }),
+      });
+      if (saveRes.ok) {
+        const updated: Question = await saveRes.json();
+        setApp(prev => prev
+          ? { ...prev, questions: prev.questions.map(q => q.id === qId ? updated : q) }
+          : prev
+        );
+      }
+    } catch (err) {
+      console.error('Refine error:', err);
+    } finally {
+      setRefining(prev => ({ ...prev, [qId]: false }));
+    }
   };
 
   // ── Export ─────────────────────────────────────────────────────────────────
@@ -598,11 +680,11 @@ export default function ApplicationDetailPage() {
                   {/* Action bar */}
                   <div className="flex items-center gap-2 mt-2 flex-wrap">
                     <button
-                      onClick={() => {/* placeholder — AI wired in next step */}}
-                      disabled={isLocked}
+                      onClick={() => generateDraft(q.id)}
+                      disabled={isLocked || generating[q.id]}
                       className="text-xs px-2.5 py-1 border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed"
                     >
-                      ✦ Generate Draft
+                      {generating[q.id] ? 'Generating…' : '✦ Generate Draft'}
                     </button>
 
                     <button
@@ -635,6 +717,31 @@ export default function ApplicationDetailPage() {
                       </button>
                     )}
                   </div>
+
+                  {/* Refine row — only shown when a draft exists and question is unlocked */}
+                  {draftValue && !isLocked && (
+                    <div className="flex gap-2 mt-2">
+                      <input
+                        type="text"
+                        value={refineInputs[q.id] ?? ''}
+                        onChange={e =>
+                          setRefineInputs(prev => ({ ...prev, [q.id]: e.target.value }))
+                        }
+                        onKeyDown={e => {
+                          if (e.key === 'Enter') refineDraft(q.id, draftValue);
+                        }}
+                        placeholder="e.g. punchier opener, cut second para, add a specific number"
+                        className="flex-1 text-sm border border-gray-200 rounded px-2 py-1 bg-gray-50 focus:outline-none focus:ring-1 focus:ring-gray-500 placeholder:text-gray-300"
+                      />
+                      <button
+                        onClick={() => refineDraft(q.id, draftValue)}
+                        disabled={refining[q.id] || !refineInputs[q.id]?.trim()}
+                        className="text-xs px-2.5 py-1 border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+                      >
+                        {refining[q.id] ? 'Refining…' : 'Refine'}
+                      </button>
+                    </div>
+                  )}
                 </div>
               </li>
             );
